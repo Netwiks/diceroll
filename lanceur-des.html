@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lanceur de dés JDR</title>
+<style>
+:root{--bg:#f4f1ea;--panel:#fffdf8;--ink:#2a2118;--mut:#7a6d5c;--line:#d9cfbd;--acc:#8a2b1d;--accink:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14110d;--panel:#211c16;--ink:#f1e8d8;--mut:#a39682;--line:#3a3227;--acc:#d9553f;--accink:#1a0f0b;color-scheme:dark}}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+#stage{flex:1;position:relative;min-height:200px}
+#cv{width:100%;height:100%;display:block}
+#hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#e9dfc8;font-size:18px;pointer-events:none;text-shadow:0 2px 8px #000;text-align:center;padding:20px}
+#panel{background:var(--panel);border-top:1px solid var(--line);padding:10px 12px;display:flex;flex-direction:column;gap:8px;max-height:48vh;overflow-y:auto}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+button,input{font:inherit;color:var(--ink)}
+button{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+input{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;width:74px}
+.sw{width:26px;height:26px;padding:0;border-radius:50%;border:2px solid var(--line)}
+.sw.on{border-color:var(--ink);outline:2px solid var(--acc)}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-left:6px solid var(--c);border-radius:8px;padding:2px 4px 2px 8px;background:var(--bg)}
+.chip button{padding:0 7px;border:0;background:none;font-size:18px}
+#go{background:var(--acc);color:var(--accink);border-color:var(--acc);font-weight:700;padding:8px 22px;font-size:16px}
+#res{min-height:22px}
+#res b{font-size:18px}
+details{color:var(--mut);font-size:13px}
+em{color:var(--mut)}
+</style></head><body>
+<div id="stage"><canvas id="cv"></canvas><div id="hint">Compose ta réserve de dés, puis lance&nbsp;🎲</div></div>
+<div id="panel">
+ <div class="row" id="quick"></div>
+ <div class="row">
+  <label>Faces <input id="fn" type="number" min="2" max="10000" value="26"></label>
+  <label>Qté <input id="fq" type="number" min="1" max="24" value="1" style="width:56px"></label>
+  <span class="row" id="sws"></span>
+  <button id="add">Ajouter</button>
+ </div>
+ <div class="row" id="pool"></div>
+ <div class="row"><button id="go">Lancer (Espace)</button><button id="clr">Vider</button><span id="res"></span></div>
+ <details><summary>Historique</summary><div id="hist"></div></details>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=s=>document.querySelector(s),V=THREE.Vector3;
+const COLORS=["#b3261e","#1f5fbf","#2e7d32","#ece6d6","#1c1c1c","#7b3fa0","#d98f16"];
+let color=COLORS[0],pool=[{n:20,c:COLORS[0],k:1}],hist=[],busy=false,dice=[],ext={w:10,d:5},T0=0,END=0;
+const ink=c=>{const h=parseInt(c.slice(1),16);return((h>>16)*.299+((h>>8)&255)*.587+(h&255)*.114)>150?"#1b1510":"#fbf6ea"};
+const rnd=n=>{const a=new Uint32Array(1),lim=Math.floor(4294967296/n)*n;let x;do{crypto.getRandomValues(a);x=a[0]}while(x>=lim);return x%n};
+
+/* ---------- scène ---------- */
+const cv=$("#cv"),R=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+R.setPixelRatio(Math.min(devicePixelRatio,2));R.shadowMap.enabled=true;R.shadowMap.type=THREE.PCFSoftShadowMap;
+const sc=new THREE.Scene();sc.background=new THREE.Color(0x0d0b08);sc.fog=new THREE.Fog(0x0d0b08,26,60);
+const cam=new THREE.PerspectiveCamera(40,1,.1,200);
+sc.add(new THREE.HemisphereLight(0xfff2dd,0x203018,.8));
+const L=new THREE.DirectionalLight(0xffffff,.9);L.position.set(-6,16,8);L.castShadow=true;L.shadow.mapSize.set(2048,2048);
+Object.assign(L.shadow.camera,{left:-20,right:20,top:20,bottom:-20,near:1,far:50});L.shadow.camera.updateProjectionMatrix();L.shadow.bias=-.0005;sc.add(L);
+const fc=document.createElement("canvas");fc.width=fc.height=256;const fx=fc.getContext("2d");
+fx.fillStyle="#1d5b3a";fx.fillRect(0,0,256,256);
+for(let i=0;i<9000;i++){fx.fillStyle=Math.random()<.5?"rgba(255,255,255,.05)":"rgba(0,0,0,.09)";fx.fillRect(Math.random()*256,Math.random()*256,1.5,1.5)}
+const ft=new THREE.CanvasTexture(fc);ft.wrapS=ft.wrapT=THREE.RepeatWrapping;ft.repeat.set(20,14);
+const table=new THREE.Mesh(new THREE.PlaneGeometry(80,56),new THREE.MeshPhongMaterial({map:ft,shininess:4}));
+table.rotation.x=-Math.PI/2;table.receiveShadow=true;sc.add(table);
+
+function placeCam(){const asp=cam.aspect,t=Math.tan(20*Math.PI/180);
+ const h=Math.max(9,(ext.w+3)/2/(t*asp)/1.1,(ext.d+3)*1.05);
+ cam.position.set(0,h,h*.5);cam.lookAt(0,0,.5)}
+function fit(){const s=$("#stage"),w=s.clientWidth,h=s.clientHeight;R.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix();placeCam()}
+addEventListener("resize",fit);
+
+/* ---------- géométrie d'un dé à N faces ---------- */
+/* N faces = dual de l'enveloppe convexe de N points sur la sphère (points répartis en spirale de Fibonacci) */
+const S={};
+function shape(M){
+ if(S[M])return S[M];let P=[];
+ if(M==4)P=[[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]];
+ else if(M==6)P=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+ else if(M==12){const p=1.618;for(const s of[-1,1])for(const t of[-1,1])P.push([0,s,t*p],[s,t*p,0],[t*p,0,s])}
+ else for(let i=0;i<M;i++){const y=1-2*(i+.5)/M,r=Math.sqrt(1-y*y),t=i*2.399963;P.push([Math.cos(t)*r,y,Math.sin(t)*r])}
+ P=P.map(p=>new V(...p).normalize());
+ const tris=[];
+ for(let i=0;i<M;i++)for(let j=i+1;j<M;j++)for(let k=j+1;k<M;k++){
+  const n=new V().subVectors(P[j],P[i]).cross(new V().subVectors(P[k],P[i])),l=n.length();if(l<1e-9)continue;
+  n.divideScalar(l);let d=n.dot(P[i]);if(d<0){n.negate();d=-d}if(d<1e-9)continue;
+  let ok=true;for(let q=0;q<M;q++)if(q!=i&&q!=j&&q!=k&&n.dot(P[q])>d+1e-9){ok=false;break}
+  if(ok)tris.push({i,j,k,v:n.divideScalar(d)})}
+ let mx=0;tris.forEach(t=>mx=Math.max(mx,t.v.length()));
+ const R0=1+.35*Math.log10(M),k=R0/mx;
+ const faces=P.map((a,i)=>{
+  const ref=Math.abs(a.y)>.95?new V(1,0,0):new V(0,1,0),e1=new V().crossVectors(ref,a).normalize(),e2=new V().crossVectors(a,e1),c=a.clone().multiplyScalar(k);
+  const ang=p=>{const d=p.clone().sub(c);return Math.atan2(d.dot(e2),d.dot(e1))};
+  const vs=tris.filter(t=>t.i==i||t.j==i||t.k==i).map(t=>t.v.clone().multiplyScalar(k)).sort((p,q)=>ang(p)-ang(q));
+  const q=vs.map(p=>{const d=p.clone().sub(c);return[d.dot(e1),d.dot(e2)]});let r=1e9;
+  q.forEach((p,j)=>{const o=q[(j+1)%q.length];r=Math.min(r,Math.abs(p[0]*o[1]-o[0]*p[1])/Math.hypot(o[0]-p[0],o[1]-p[1]))});
+  return{a,e1,c,vs,r}});
+ return S[M]={faces,k,R:R0}}
+
+function build(n,col,val,fi){
+ const tc=ink(col),cs=128;
+ if(n<4){
+  const c=document.createElement("canvas");c.width=c.height=256;const x=c.getContext("2d");
+  x.fillStyle=col;x.fillRect(0,0,256,256);x.strokeStyle=tc;x.lineWidth=8;x.beginPath();x.arc(128,128,108,0,7);x.stroke();
+  x.fillStyle=tc;x.font="700 130px sans-serif";x.textAlign="center";x.textBaseline="middle";x.fillText(val,128,136);
+  const m=new THREE.MeshPhongMaterial({map:new THREE.CanvasTexture(c),shininess:90,specular:0x888888});
+  const side=new THREE.MeshPhongMaterial({color:col,shininess:90,specular:0x888888});
+  return{mesh:new THREE.Mesh(new THREE.CylinderGeometry(.95,.95,.2,48),[side,m,m]),rest:.1,a:new V(0,1,0),R:1}}
+ const M=Math.min(n,100),s=shape(M),cols=Math.ceil(Math.sqrt(M)),rows=Math.ceil(M/cols);
+ const c=document.createElement("canvas");c.width=cols*cs;c.height=rows*cs;const x=c.getContext("2d");
+ x.fillStyle=col;x.fillRect(0,0,c.width,c.height);x.fillStyle=tc;x.textAlign="center";x.textBaseline="middle";
+ for(let i=0;i<M;i++){
+  let t=n>100?(i==fi?String(val):""):String(i+1);if(!t)continue;
+  if(n<=100&&(t=="6"||t=="9"))t+=".";
+  const l=t.replace(".","").length;x.font=`700 ${cs*(l<=2?.4:l==3?.3:.23)}px sans-serif`;
+  x.fillText(t,(i%cols+.5)*cs,(Math.floor(i/cols)+.5)*cs+cs*.03)}
+ const pos=[],uv=[];
+ s.faces.forEach((f,i)=>{
+  const cl=i%cols,rw=Math.floor(i/cols);
+  const put=p=>{pos.push(p.x,p.y,p.z);const d=p.clone().sub(f.c),w=3*f.r;
+   const dx=Math.max(-.49,Math.min(.49,d.dot(f.e1)/w)),dy=Math.max(-.49,Math.min(.49,d.dot(new V().crossVectors(f.a,f.e1))/w));
+   uv.push((cl+.5+dx)/cols,1-(rw+.5-dy)/rows)};
+  f.vs.forEach((p,j)=>{put(f.c);put(p);put(f.vs[(j+1)%f.vs.length])})});
+ const g=new THREE.BufferGeometry();
+ g.setAttribute("position",new THREE.BufferAttribute(new Float32Array(pos),3));
+ g.setAttribute("uv",new THREE.BufferAttribute(new Float32Array(uv),2));g.computeVertexNormals();
+ const tex=new THREE.CanvasTexture(c);tex.anisotropy=8;
+ return{mesh:new THREE.Mesh(g,new THREE.MeshPhongMaterial({map:tex,shininess:70,specular:0x555555})),rest:s.k,a:s.faces[fi].a,R:s.R}}
+
+/* ---------- lancer ---------- */
+const UP=new V(0,1,0),qs=new THREE.Quaternion();
+function roll(){
+ if(busy||!pool.length)return;$("#hint").style.display="none";
+ dice.forEach(d=>{sc.remove(d.mesh);d.mesh.geometry.dispose()});dice=[];
+ const list=[];pool.forEach(p=>{for(let i=0;i<p.k;i++)list.push(p)});
+ const Tn=list.length,cols=Math.min(Tn,6),rows=Math.ceil(Tn/cols);
+ list.forEach(p=>{
+  const val=rnd(p.n)+1,fi=p.n>100?rnd(100):val-1,b=build(p.n,p.c,val,fi);
+  b.n=p.n;b.val=val;b.mesh.castShadow=true;b.mesh.visible=false;sc.add(b.mesh);dice.push(b)});
+ const sp=Math.max(...dice.map(d=>d.R))*2.1+.5;
+ ext={w:cols*sp,d:rows*sp};placeCam();
+ const now=performance.now();T0=now;END=0;
+ dice.forEach((d,i)=>{
+  d.end=new V(((i%cols)-(cols-1)/2)*sp,d.rest,(Math.floor(i/cols)-(rows-1)/2)*sp+.5);
+  const sd=Math.random()<.5?-1:1;d.start=new V(d.end.x+sd*(ext.w/2+8+Math.random()*4),0,d.end.z+4+Math.random()*4);
+  d.qEnd=new THREE.Quaternion().setFromAxisAngle(UP,Math.random()*6.283).multiply(new THREE.Quaternion().setFromUnitVectors(d.a,UP));
+  d.axis=new V(Math.random()-.5,Math.random()-.5,Math.random()-.5).normalize();
+  d.ang=(5+Math.random()*5)*Math.PI;d.delay=i*70;d.dur=1700+Math.random()*500;END=Math.max(END,d.delay+d.dur)});
+ busy=true;$("#res").textContent="…";
+ const lab=pool.map(p=>(p.k>1?p.k:"")+"d"+p.n).join(" + ");
+ d_label=lab}
+let d_label="";
+function showRes(){
+ busy=false;const g={};dice.forEach(d=>(g[d.n]=g[d.n]||[]).push(d.val));
+ const tot=dice.reduce((a,d)=>a+d.val,0);
+ $("#res").innerHTML=Object.keys(g).map(n=>`d${n}&nbsp;: ${g[n].join(" + ")}`).join(" &nbsp;|&nbsp; ")+` &nbsp;→&nbsp; <b>${tot}</b>`;
+ hist.unshift(`${new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})} · ${d_label} = ${dice.map(d=>d.val).join(", ")} (total ${tot})`);
+ $("#hist").innerHTML=hist.slice(0,15).map(h=>`<div>${h}</div>`).join("")}
+function tick(now){
+ requestAnimationFrame(tick);
+ if(dice.length&&busy){
+  dice.forEach(d=>{
+   const t=Math.max(0,Math.min(1,(now-T0-d.delay)/d.dur));d.mesh.visible=now-T0>=d.delay;
+   const e=1-Math.pow(1-t,2.2);
+   d.mesh.position.set(d.start.x+(d.end.x-d.start.x)*e,d.rest+2.6*Math.pow(1-t,2)*Math.abs(Math.cos(t*Math.PI*2.5)),d.start.z+(d.end.z-d.start.z)*e);
+   qs.setFromAxisAngle(d.axis,d.ang*Math.pow(1-t,1.6));d.mesh.quaternion.copy(qs).multiply(d.qEnd)});
+  if(now-T0>END+80)showRes()}
+ R.render(sc,cam)}
+
+/* ---------- interface ---------- */
+const total=()=>pool.reduce((a,p)=>a+p.k,0);
+function add(n,k){
+ n=Math.round(n);k=Math.round(k)||1;
+ if(!(n>=2&&n<=10000)){$("#res").textContent="Nombre de faces : entre 2 et 10 000.";return}
+ k=Math.min(k,24-total());if(k<=0){$("#res").textContent="Maximum 24 dés à la fois.";return}
+ const p=pool.find(p=>p.n==n&&p.c==color);p?p.k+=k:pool.push({n,c:color,k});draw()}
+function draw(){
+ $("#pool").innerHTML=pool.map((p,i)=>`<span class="chip" style="--c:${p.c}"><button data-m="${i}">−</button>${p.k}×d${p.n}<button data-p="${i}">+</button></span>`).join("")||"<em>Réserve vide : ajoute des dés ci-dessous.</em>"}
+$("#pool").onclick=e=>{const m=e.target.dataset.m,p=e.target.dataset.p;
+ if(m!=null&&--pool[m].k<=0)pool.splice(m,1);
+ if(p!=null&&total()<24)pool[p].k++;draw()};
+$("#quick").innerHTML=[2,3,4,6,8,10,12,20,100].map(n=>`<button data-q="${n}">d${n}</button>`).join("");
+$("#quick").onclick=e=>{if(e.target.dataset.q)add(+e.target.dataset.q,1)};
+$("#sws").innerHTML=COLORS.map((c,i)=>`<button class="sw${i?"":" on"}" data-c="${c}" style="background:${c}" aria-label="Couleur ${i+1}"></button>`).join("");
+$("#sws").onclick=e=>{if(!e.target.dataset.c)return;color=e.target.dataset.c;document.querySelectorAll(".sw").forEach(s=>s.classList.toggle("on",s==e.target))};
+$("#add").onclick=()=>add(+$("#fn").value,+$("#fq").value);
+$("#fn").onkeydown=e=>{if(e.key=="Enter")$("#add").click()};
+$("#clr").onclick=()=>{pool=[];draw()};
+$("#go").onclick=roll;
+addEventListener("keydown",e=>{if(e.code=="Space"&&!/INPUT|BUTTON/.test(e.target.tagName)){e.preventDefault();roll()}});
+draw();fit();requestAnimationFrame(tick);
+</script></body></html>
